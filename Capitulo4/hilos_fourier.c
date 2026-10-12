@@ -1,24 +1,22 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <string.h>
+#include <errno.h>
+#include <limits.h>
+#include <ctype.h>
 #include <math.h>
 #include <pthread.h>
+#include <time.h>
+
 
 #define PI 3.14159265358979323846
 #define PASO 0.1
 #define A0_1 (pow(M_PI, 4) / 25) + 1
 #define A0_2 0.0f
-#define A0_3 (pow(M_PI, 4) - 150.0f) * (1.0f / 30.0f)
+#define A0_3 -(pow(M_PI, 4) - 150.0f) * (1.0f / 30.0f)
 #define A0_4 3.0f
 
-pthread_mutex_t mutex_archivo = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t condicion_orden = PTHREAD_COND_INITIALIZER;
-int siguiente_indice_escritura = 0;
-
-
-
-double funcion_fourier(double x, int n, int caso) {
+double funcion_fourier(double x, int n, int caso)
+{
     switch (caso) {
     case 0: {
         float AN = (2 * (((pow(M_PI, 4) + 5) * pow(n, 4) - 12 * pow(M_PI, 2) * pow(n, 2) + 24) * sin(M_PI * n))
@@ -36,74 +34,6 @@ double funcion_fourier(double x, int n, int caso) {
     default:
         return -1.0f;
     }
-}
-
-void crear_csv(int n, int opcion_funcion)
-{
-    // archivo de csv dinamico para guardar los resultados de la funcion de fourier
-    FILE *archivo = NULL;
-    switch (opcion_funcion)
-    {
-    case 0:
-        archivo = fopen("resultados_ernesto.csv", "w");
-        break;
-    case 1:
-        archivo = fopen("resultados_uriel.csv", "w");
-        break;
-    case 2:
-        archivo = fopen("resultados_omar.csv", "w");
-        break;
-    case 3:
-        archivo = fopen("resultados_diego.csv", "w");
-        break;
-    default:
-        break;
-    }
-    // Comprobar si el archivo se creo correctamente
-    if (archivo == NULL)
-    {
-        perror("Error al crear el archivo de resultados");
-        exit(-1);
-    }
-    // Escribir el encabezado del archivo de resultados
-    // Primera fila se pondra x y luego el numero de armonicos
-    // Exactamente de esta forma x,1,2,3,...,n,f
-    fprintf(archivo, "x");
-    for (int i = 1; i <= n; i++)
-    {
-        fprintf(archivo, ",%d", i);
-    }
-    fprintf(archivo, ",F\n");
-    fclose(archivo);
-}
-
-FILE *abrir_archivo_resultados(int opcion_funcion)
-{
-    FILE *archivo = NULL;
-    switch (opcion_funcion)
-    {
-    case 0:
-        archivo = fopen("resultados_ernesto.csv", "a");
-        break;
-    case 1:
-        archivo = fopen("resultados_uriel.csv", "a");
-        break;
-    case 2:
-        archivo = fopen("resultados_omar.csv", "a");
-        break;
-    case 3:
-        archivo = fopen("resultados_diego.csv", "a");
-        break;
-    default:
-        break;
-    }
-    // Comprobar si el archivo se abrio correctamente
-    if (archivo == NULL)
-    {
-        perror("Error al abrir el archivo de resultados");
-        exit(-1);
-    }
-    return archivo;
 }
 
 double obtener_a0(int opcion_funcion)
@@ -125,50 +55,21 @@ double obtener_a0(int opcion_funcion)
 
 typedef struct
 {
-    int indice;
     int opcion_funcion;
     int numero_armonicos;
     double x;
-    double *resultados_locales;
+    double *resultado;
 } DatosHilo;
 
-void *tarea_abrir_archivo_resultados(void *arg)
+void *calcular_suma_fourier(void *arg)
 {
     DatosHilo *datos = (DatosHilo *)arg;
     double suma_armonicos = 0.0;
-    double f_total = 0.0;
 
-    for (int j = 0; j < datos->numero_armonicos; j++)
-    {
-        suma_armonicos += datos->resultados_locales[j];
-    }
-    f_total = obtener_a0(datos->opcion_funcion) + suma_armonicos;
+    for (int n = 1; n <= datos->numero_armonicos; n++)
+        suma_armonicos += funcion_fourier(datos->x, n, datos->opcion_funcion);
+    *datos->resultado = obtener_a0(datos->opcion_funcion) + suma_armonicos;
 
-    pthread_mutex_lock(&mutex_archivo);
-    while (datos->indice != siguiente_indice_escritura)
-    {
-        pthread_cond_wait(&condicion_orden, &mutex_archivo);
-    }
-
-    // Abrir el archivo de resultados para escribir los resultados locales calculados por el hilo
-    FILE *archivo = abrir_archivo_resultados(datos->opcion_funcion);
-
-    fprintf(archivo, "%lf", datos->x);
-
-    // Escribir los resultados locales calculados por el hilo en el archivo de resultados
-    for (int j = 0; j < datos->numero_armonicos; j++)
-    {
-        fprintf(archivo, ",%lf", datos->resultados_locales[j]);
-    }
-    fprintf(archivo, ",%lf\n", f_total);
-
-    fclose(archivo);
-
-    siguiente_indice_escritura++;
-    pthread_cond_broadcast(&condicion_orden);
-    pthread_mutex_unlock(&mutex_archivo);
-
-    free(datos->resultados_locales);
     free(datos);
     return NULL;
 }
@@ -180,85 +81,95 @@ int calcular_hilos(double pi, double paso)
 
 int main()
 {
+    time_t inicio, fin;
     // Cantidad de armonicos a calcular
+    inicio = time(NULL);
     int numero_armonicos;
-    printf("Ingrese el numero de armonicos a calcular: ");
-    scanf("%d", &numero_armonicos);
-    if (numero_armonicos <= 0)
+    char entrada[128];
+    while (1)
     {
-        while (1)
+        char *fin;
+        long valor;
+
+        printf("Ingrese un numero entero positivo de armonicos: ");
+        if (fgets(entrada, sizeof(entrada), stdin) == NULL)
         {
-            printf("El numero de armonicos debe ser mayor a 0. Ingrese nuevamente: ");
-            scanf("%d", &numero_armonicos);
-            if (numero_armonicos > 0)
-            {
-                break;
-            }
+            fprintf(stderr, "No se pudo leer la entrada.\n");
+            return 1;
         }
+
+        errno = 0;
+        valor = strtol(entrada, &fin, 10);
+        while (isspace((unsigned char)*fin))
+            fin++;
+
+        if (fin != entrada && *fin == '\0' && errno != ERANGE &&
+            valor > 0 && valor <= INT_MAX)
+        {
+            numero_armonicos = (int)valor;
+            break;
+        }
+
+        printf("Entrada invalida. Debe ingresar un entero positivo.\n");
     }
 
-    for(int opcion_funcion = 0; opcion_funcion <= 3; opcion_funcion++){
-    
-        crear_csv(numero_armonicos, opcion_funcion);
-        siguiente_indice_escritura = 0;
-    
-        // Calcular cuantos hilos se necesitan
-        int numero_hilos = calcular_hilos(PI, PASO);
-    
-        // Crear hilos para calcular los resultados de la funcion de fourier y guardarlos en el archivo de resultados
-        pthread_t hilos[numero_hilos];
-    
-        // Cada hilo se encargara de calcular los valores del armonico n para un valor de x y guardarlos en el archivo de resultados
+    int numero_hilos = calcular_hilos(PI, PASO);
+    double resultados[4][numero_hilos];
+    pthread_t hilos[numero_hilos];
+
+    for (int opcion_funcion = 0; opcion_funcion < 4; opcion_funcion++)
+    {
         for (int i = 0; i < numero_hilos; i++)
         {
-            double x = -PI + i * PASO;
-            if (x > PI)
-            {
-                x = PI; // Asegurarse de que el ultimo valor de x sea exactamente PI
-            }
-            double *resultados_locales = malloc(numero_armonicos * sizeof(double));
-            if (resultados_locales == NULL)
-            {
-                perror("Error al reservar memoria para resultados locales");
-                exit(-1);
-            }
-            for (int j = 1; j <= numero_armonicos; j++)
-            {
-                resultados_locales[j - 1] = funcion_fourier(x, j, opcion_funcion);
-            }
-    
             DatosHilo *datos_hilo = malloc(sizeof(DatosHilo));
             if (datos_hilo == NULL)
             {
                 perror("Error al reservar memoria para datos del hilo");
-                free(resultados_locales);
-                exit(-1);
+                return 1;
             }
-            datos_hilo->indice = i;
+
             datos_hilo->opcion_funcion = opcion_funcion;
             datos_hilo->numero_armonicos = numero_armonicos;
-            datos_hilo->x = x;
-            datos_hilo->resultados_locales = resultados_locales;
-    
-            if (pthread_create(&hilos[i], NULL, tarea_abrir_archivo_resultados, datos_hilo) != 0)
+            datos_hilo->x = -PI + i * PASO;
+            datos_hilo->resultado = &resultados[opcion_funcion][i];
+
+            if (pthread_create(&hilos[i], NULL, calcular_suma_fourier, datos_hilo) != 0)
             {
                 perror("Error al crear hilo");
-                free(datos_hilo->resultados_locales);
                 free(datos_hilo);
-                exit(-1);
+                return 1;
             }
         }
-    
-        // Esperar a que todos los hilos terminen
+
         for (int i = 0; i < numero_hilos; i++)
         {
             if (pthread_join(hilos[i], NULL) != 0)
             {
                 perror("Error al esperar a que termine el hilo");
-                exit(-1);
+                return 1;
             }
         }
     }
 
+    FILE *archivo = fopen("resultados_fourier.csv", "w");
+    if (archivo == NULL)
+    {
+        perror("Error al crear el CSV");
+        return 1;
+    }
+
+    fprintf(archivo, "x,ernesto,uriel,omar,diego\n");
+    for (int i = 0; i < numero_hilos; i++)
+    {
+        double x = -PI + i * PASO;
+        fprintf(archivo, "%lf,%lf,%lf,%lf,%lf\n", x,
+                resultados[0][i], resultados[1][i],
+                resultados[2][i], resultados[3][i]);
+    }
+    fclose(archivo);
+
+    fin = time(NULL);
+
+    printf("Time taken to print sum is %.2f seconds",difftime(fin, inicio));
     return 0;
 }
