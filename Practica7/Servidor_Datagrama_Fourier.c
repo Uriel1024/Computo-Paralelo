@@ -1,13 +1,8 @@
 /*
- * Servidor_Datagrama_Fourier.c — Servidor UDP para cálculo distribuido de Armónicos de Fourier
+ * Servidor_Datagrama_Fourier.c — Servidor UDP para cálculo distribuido en PARALELO
  *
  * Compilación: gcc Servidor_Datagrama_Fourier.c -o servidor
  * Ejecución:   ./servidor
- *
- * Protocolo de mensajes:
- *   REQ:<indice>   — Cliente solicita el armónico (índice 0-9, equivalente a n = indice + 1)
- *   HAR:<n>,<x>    — Servidor envía el número de armónico n y el valor de x
- *   RES:<valor>    — Cliente devuelve el resultado flotante del armónico calculado
  */
 
 #include <stdio.h>
@@ -31,7 +26,12 @@ int main(void)
     char bufer[LONGITUD_BUFER];
     int n_bytes;
 
-    /* Valor de evaluación x por defecto para la serie de Fourier */
+    /* Variables para la sincronización y almacenamiento */
+    struct sockaddr_in clientes[TOTAL_HARMONICOS];
+    int registrados[TOTAL_HARMONICOS] = {0}; // 0 = no, 1 = registrado, 2 = resuelto
+    float resultados[TOTAL_HARMONICOS] = {0};
+    int clientes_listos = 0;
+    int resultados_recibidos = 0;
     float x_valor = 1.0f;
 
     /* ── Crear socket UDP ── */
@@ -41,7 +41,6 @@ int main(void)
         exit(1);
     }
 
-    /* ── Configurar dirección del servidor ── */
     mi_dir.sin_family = AF_INET;
     mi_dir.sin_port = htons(PUERTO_SERVIDOR);
     mi_dir.sin_addr.s_addr = INADDR_ANY;
@@ -53,74 +52,99 @@ int main(void)
         exit(1);
     }
 
-    /* ── Pantalla de bienvenida ── */
     printf("╔══════════════════════════════════════════════════╗\n");
-    printf("║  SERVIDOR UDP — Armónicos de Fourier (10 PCs)    ║\n");
+    printf("║  SERVIDOR UDP — Armónicos en PARALELO (10 PCs)   ║\n");
     printf("╚══════════════════════════════════════════════════╝\n\n");
     printf(" Valor de evaluación x = %.2f\n", x_valor);
     printf(" Escuchando en el puerto %d...\n\n", PUERTO_SERVIDOR);
 
-    /* ══════════════════════════════════════
-       Bucle principal de atención a clientes
-       ══════════════════════════════════════ */
-    while (1)
+    /* ════════════════════════════════════════════════
+       FASE 1: Registro de clientes (Esperar a los 10)
+       ════════════════════════════════════════════════ */
+    printf("[*] FASE 1: Esperando la conexión de los %d clientes...\n", TOTAL_HARMONICOS);
+    while (clientes_listos < TOTAL_HARMONICOS)
     {
         len_dir = sizeof(struct sockaddr);
-
         n_bytes = recvfrom(fd, bufer, LONGITUD_BUFER - 1, 0,
                            (struct sockaddr *)&dir_cliente, &len_dir);
-        if (n_bytes <= 0)
-        {
-            perror("recvfrom");
-            continue;
-        }
+        if (n_bytes <= 0) continue;
         bufer[n_bytes] = '\0';
 
         char *ip = inet_ntoa(dir_cliente.sin_addr);
 
-        /* ────────────────────────────────────
-           CASO 1: Solicitud de armónico "REQ:<indice>"
-           ──────────────────────────────────── */
         if (strncmp(bufer, "REQ:", 4) == 0)
         {
             int indice = atoi(bufer + 4);
-            printf("[REQ]  %s  →  solicita armónico índice %d\n", ip, indice);
-
-            if (indice < 0 || indice >= TOTAL_HARMONICOS)
+            if (indice >= 0 && indice < TOTAL_HARMONICOS)
             {
-                const char err[] = "ERR:Índice inválido. Use un valor entre 0 y 9.";
-                sendto(fd, err, strlen(err), 0,
-                       (struct sockaddr *)&dir_cliente, len_dir);
-                printf("[ERR]  Índice fuera de rango: %d\n\n", indice);
+                if (registrados[indice] == 0)
+                {
+                    clientes[indice] = dir_cliente;
+                    registrados[indice] = 1;
+                    clientes_listos++;
+                    printf("    [REQ] %s registrado para armónico índice %d (%d/%d)\n", 
+                           ip, indice, clientes_listos, TOTAL_HARMONICOS);
+                }
             }
             else
             {
-                int n = indice + 1; /* Mapeo: índice 0-9 -> armónico n de 1 a 10 */
-                snprintf(bufer, LONGITUD_BUFER, "HAR:%d,%.4f", n, x_valor);
-                sendto(fd, bufer, strlen(bufer), 0,
-                       (struct sockaddr *)&dir_cliente, len_dir);
-                printf("[HAR]  Enviado a %s  ←  Armónico n = %d, x = %.2f\n",
-                       ip, n, x_valor);
+                printf("    [ERR] Índice fuera de rango (%d) desde %s\n", indice, ip);
             }
-
-        /* ────────────────────────────────────
-           CASO 2: Resultado recibido "RES:<valor>"
-           ──────────────────────────────────── */
-        }
-        else if (strncmp(bufer, "RES:", 4) == 0)
-        {
-            float resultado = atof(bufer + 4);
-            printf("[RES]  %s  →  Resultado del armónico recibido = %f\n\n", ip, resultado);
-
-        /* ────────────────────────────────────
-           CASO 3: Mensaje desconocido
-           ──────────────────────────────────── */
-        }
-        else
-        {
-            printf("[???]  Mensaje desconocido de %s: \"%s\"\n\n", ip, bufer);
         }
     }
+
+    /* ════════════════════════════════════════════════
+       FASE 2: Liberar barrera (Start simultáneo)
+       ════════════════════════════════════════════════ */
+    printf("\n[*] FASE 2: Todos los clientes conectados. Enviando orden de inicio...\n");
+    for (int i = 0; i < TOTAL_HARMONICOS; i++)
+    {
+        int n = i + 1;
+        snprintf(bufer, LONGITUD_BUFER, "HAR:%d,%.4f", n, x_valor);
+        sendto(fd, bufer, strlen(bufer), 0,
+               (struct sockaddr *)&clientes[i], sizeof(struct sockaddr));
+        printf("    [HAR] Orden enviada al índice %d (Armónico %d)\n", i, n);
+    }
+
+    /* ════════════════════════════════════════════════
+       FASE 3: Recibir y agrupar resultados
+       ════════════════════════════════════════════════ */
+    printf("\n[*] FASE 3: Esperando resultados en paralelo...\n");
+    while (resultados_recibidos < TOTAL_HARMONICOS)
+    {
+        len_dir = sizeof(struct sockaddr);
+        n_bytes = recvfrom(fd, bufer, LONGITUD_BUFER - 1, 0,
+                           (struct sockaddr *)&dir_cliente, &len_dir);
+        if (n_bytes <= 0) continue;
+        bufer[n_bytes] = '\0';
+
+        if (strncmp(bufer, "RES:", 4) == 0)
+        {
+            int idx;
+            float valor;
+            // El cliente ahora manda RES:indice,valor
+            if (sscanf(bufer + 4, "%d,%f", &idx, &valor) == 2)
+            {
+                if (idx >= 0 && idx < TOTAL_HARMONICOS && registrados[idx] == 1)
+                {
+                    resultados[idx] = valor;
+                    registrados[idx] = 2; // Marcar como recibido
+                    resultados_recibidos++;
+                    printf("    [RES] Resultado recibido: Armónico n=%d -> %f (%d/%d)\n", 
+                           idx + 1, valor, resultados_recibidos, TOTAL_HARMONICOS);
+                }
+            }
+        }
+    }
+
+    printf("\n╔══════════════════════════════════════════════════╗\n");
+    printf("║  TODOS LOS ARMÓNICOS CALCULADOS CON ÉXITO        ║\n");
+    printf("╚══════════════════════════════════════════════════╝\n");
+    for (int i = 0; i < TOTAL_HARMONICOS; i++)
+    {
+        printf("  Armónico n=%-2d : %-18.6f\n", i + 1, resultados[i]);
+    }
+    printf("\n");
 
     close(fd);
     return 0;
